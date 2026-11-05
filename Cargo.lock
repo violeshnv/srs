@@ -220,6 +220,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1695,6 +1696,7 @@ dependencies = [
  "log",
  "ratatui",
  "ron",
+ "serde",
 ]
 
 [[package]]
