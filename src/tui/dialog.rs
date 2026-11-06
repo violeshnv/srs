@@ -1,9 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
-    style::Style,
-    style::Stylize,
+    layout::{Constraint, Flex, Layout, Rect},
+    style::{Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Widget, Wrap},
@@ -203,10 +202,17 @@ impl Dialog {
             Self::Help { path } => ("Help".to_string(), help_lines(path), (76, 86)),
         };
 
-        let dialog_area = area.centered(
-            Constraint::Percentage(width),
-            Constraint::Percentage(height),
-        );
+        let dialog_area = {
+            let horizontal_area =
+                Layout::horizontal([Constraint::Percentage(width)]).flex(Flex::Center).split(area)[0];
+            let vertical_area = Layout::vertical([
+                Constraint::Percentage(100 - height / 2),
+                Constraint::Min(lines.len() as u16 + 2),
+                Constraint::Percentage(100 - height / 2),
+            ]).split(horizontal_area)[1];
+
+            vertical_area
+        };
         Clear.render(dialog_area, buffer);
 
         let instructions = if matches!(self, Self::Error(_) | Self::Help { .. }) {
