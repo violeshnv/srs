@@ -217,6 +217,7 @@ impl Dialog {
                 "<Enter>".green().bold(),
                 " Cancel ".into(),
                 "<Esc>".yellow().bold(),
+                " ".into(),
             ])
         };
 

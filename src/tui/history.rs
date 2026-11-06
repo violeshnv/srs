@@ -35,6 +35,7 @@ pub(crate) fn render(app: &App, name: &str, focus: usize, frame: &mut Frame) {
         "<t>".blue().bold(),
         " Help ".into(),
         "<?>".blue().bold(),
+        " ".into(),
     ]);
 
     let mut block = Block::bordered()
