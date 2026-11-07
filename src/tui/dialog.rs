@@ -11,9 +11,8 @@ use ratatui::{
 /// The result of a key press while a dialog is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    Pending,
-    Confirm,
     Cancel,
+    Confirm,
 }
 
 /// One-line text editor with a movable cursor, used by all input dialogs.
@@ -105,54 +104,47 @@ pub struct Confirm {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     RemoveHistory(String),
-    RemoveReview { name: String, index: usize },
+    RemoveReview { index: usize },
     UndoLast(String),
 }
 
 pub enum Dialog {
     Add(TextInput),
-    Rename {
-        old: String,
-        input: TextInput,
-    },
-    SetTime {
-        name: String,
-        index: usize,
-        input: TextInput,
-    },
+    Rename { old: String, input: TextInput },
+    SetTime { index: usize, input: TextInput },
     Confirm(Confirm),
     Error(String),
-    Help {
-        path: String,
-    },
+    Help { path: String },
 }
 
 impl Dialog {
-    pub fn handle_key_event(&mut self, key: KeyEvent) -> Outcome {
+    pub fn handle_key_event(&mut self, key: KeyEvent) -> Option<Outcome> {
         match self {
             Self::Add(input) => text_input_outcome(input, key),
             Self::Rename { input, .. } => text_input_outcome(input, key),
             Self::SetTime { input, .. } => text_input_outcome(input, key),
             Self::Confirm(_) => match key.code {
-                KeyCode::Enter => Outcome::Confirm,
-                KeyCode::Esc => Outcome::Cancel,
-                _ => Outcome::Pending,
+                KeyCode::Enter => Some(Outcome::Confirm),
+                KeyCode::Esc => Some(Outcome::Cancel),
+                _ => None,
             },
             Self::Error(_) => match key.code {
-                KeyCode::Enter | KeyCode::Esc => Outcome::Cancel,
-                _ => Outcome::Pending,
+                KeyCode::Enter | KeyCode::Esc => Some(Outcome::Cancel),
+                _ => None,
             },
             Self::Help { .. } => match key.code {
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
-                    Outcome::Cancel
-                }
-                _ => Outcome::Pending,
+                KeyCode::Enter
+                | KeyCode::Esc
+                | KeyCode::Char('q')
+                | KeyCode::Char('Q')
+                | KeyCode::Char('?') => Some(Outcome::Cancel),
+                _ => None,
             },
         }
     }
 
     pub fn render(&self, area: Rect, buffer: &mut Buffer) {
-        let (title, lines, (width, height)) = match self {
+        let (title, lines, width) = match self {
             Self::Add(input) => (
                 "Add item".to_string(),
                 vec![
@@ -160,7 +152,7 @@ impl Dialog {
                     Line::from(""),
                     input_line(input),
                 ],
-                (60, 22),
+                60,
             ),
             Self::Rename { old, input } => (
                 "Rename item".to_string(),
@@ -169,7 +161,7 @@ impl Dialog {
                     Line::from(""),
                     input_line(input),
                 ],
-                (60, 22),
+                60,
             ),
             Self::SetTime { index, input, .. } => (
                 format!("Edit review #{}", index + 1),
@@ -180,7 +172,7 @@ impl Dialog {
                     Line::from(""),
                     Line::from("Format: YYYY-MM-DD HH:MM"),
                 ],
-                (64, 28),
+                64,
             ),
             Self::Confirm(confirm) => (
                 confirm.title.clone(),
@@ -189,7 +181,7 @@ impl Dialog {
                     .lines()
                     .map(|line| Line::from(line.to_string()))
                     .collect(),
-                (60, 24),
+                60,
             ),
             Self::Error(message) => (
                 "Error".to_string(),
@@ -197,32 +189,25 @@ impl Dialog {
                     .lines()
                     .map(|line| Line::from(line.to_string()))
                     .collect(),
-                (64, 26),
+                64,
             ),
-            Self::Help { path } => ("Help".to_string(), help_lines(path), (76, 86)),
+            Self::Help { path } => ("Help".to_string(), help_lines(path), 76),
         };
 
-        let dialog_area = {
-            let horizontal_area =
-                Layout::horizontal([Constraint::Percentage(width)]).flex(Flex::Center).split(area)[0];
-            let vertical_area = Layout::vertical([
-                Constraint::Percentage(100 - height / 2),
-                Constraint::Min(lines.len() as u16 + 2),
-                Constraint::Percentage(100 - height / 2),
-            ]).split(horizontal_area)[1];
-
-            vertical_area
-        };
+        // Two rows for the top/bottom borders; `Min` lets long wrapped lines
+        // grow the dialog instead of clipping them.
+        let min_height = lines.len() as u16 + 2;
+        let dialog_area = dialog_area(area, width, min_height);
         Clear.render(dialog_area, buffer);
 
         let instructions = if matches!(self, Self::Error(_) | Self::Help { .. }) {
-            Line::from(vec![" Close ".into(), "<Enter/Esc>".green().bold()])
+            Line::from(vec![" Close ".into(), "<ENTER/ESC>".green().bold()])
         } else {
             Line::from(vec![
                 " Confirm ".into(),
-                "<Enter>".green().bold(),
+                "<ENTER>".green().bold(),
                 " Cancel ".into(),
-                "<Esc>".yellow().bold(),
+                "<ESC>".yellow().bold(),
                 " ".into(),
             ])
         };
@@ -238,13 +223,27 @@ impl Dialog {
     }
 }
 
-fn text_input_outcome(input: &mut TextInput, key: KeyEvent) -> Outcome {
+/// A horizontally-centered box whose height is at least `min_height` and grows
+/// with its (possibly wrapped) content.
+fn dialog_area(area: Rect, width_percent: u16, min_height: u16) -> Rect {
+    let horizontal = Layout::horizontal([Constraint::Percentage(width_percent)])
+        .flex(Flex::Center)
+        .split(area)[0];
+    Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Min(min_height),
+        Constraint::Fill(1),
+    ])
+    .split(horizontal)[1]
+}
+
+fn text_input_outcome(input: &mut TextInput, key: KeyEvent) -> Option<Outcome> {
     match key.code {
-        KeyCode::Enter => Outcome::Confirm,
-        KeyCode::Esc => Outcome::Cancel,
+        KeyCode::Enter => Some(Outcome::Confirm),
+        KeyCode::Esc => Some(Outcome::Cancel),
         _ => {
             input.handle_key(key);
-            Outcome::Pending
+            None
         }
     }
 }
@@ -263,26 +262,27 @@ fn help_lines(path: &str) -> Vec<Line<'static>> {
     let text = format!(
         "\
 Home
-  Up/Down, j/k      move selection
-  Enter, Right, l   open the item's review history
+  Up/Down, J/K      move selection
+  Enter, Right, L   open the item's detail page
   1-4               review now (Again / Hard / Good / Easy)
-  a                 add item
-  e                 rename item
-  d                 delete item
-  u                 undo the last review
-  s                 switch sort order (name / due)
+  A                 add item
+  R                 rename item
+  D                 delete item
+  U                 undo the last review
+  S                 cycle sort (due/name, ascending/descending)
   ?                 this help
-  q, Esc            save and quit
+  Q, Esc            save and quit
 
-History
-  Up/Down, j/k      select a review
+Detail
+  Up/Down, J/K      select a review
   1-4               change the selected review's rating
-  x, Delete         delete the selected review
-  t                 change the selected review's time
-  Esc, Left, h, q   back to home
+  X, Delete         delete the selected review
+  T                 change the selected review's time
+  Esc, Left, H, Q   back to home
 
 Editing a review replays every later review, so states, intervals and
-due dates are always consistent with the review log.
+due dates are always consistent with the review log. Sort is case-insensitive
+and uses natural ordering for names (item2 before item10).
 
 Data file
   {path}

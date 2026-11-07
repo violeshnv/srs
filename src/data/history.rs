@@ -82,44 +82,43 @@ pub struct ScheduledReview {
     pub due: DateTime<Utc>,
 }
 
-/// The full, replayed schedule of an item.
+/// The full, replayed schedule of an item. The review list is the single
+/// source of truth; the current memory state, interval, and due date are
+/// derived from its last entry.
 #[derive(Debug, Clone)]
 pub struct Schedule {
     pub reviews: Vec<ScheduledReview>,
-    /// Memory state after the last review (`None` for a never-reviewed item).
-    pub memory: Option<MemoryState>,
-    pub interval_days: Option<f32>,
-    pub due: Option<DateTime<Utc>>,
 }
 
 impl Schedule {
     fn empty() -> Self {
         Self {
             reviews: Vec::new(),
-            memory: None,
-            interval_days: None,
-            due: None,
         }
     }
-}
 
-/// The small amount of information the home page needs about an item.
-#[derive(Debug, Clone, Copy)]
-pub struct Summary {
-    pub reviews: usize,
-    pub memory: Option<MemoryState>,
-    pub last_review: Option<DateTime<Utc>>,
-    pub interval_days: f32,
-    /// Due date of the last review; the creation time for a new item.
-    pub due: DateTime<Utc>,
-}
+    pub fn reviews(&self) -> &[ScheduledReview] {
+        &self.reviews
+    }
 
-impl Summary {
-    /// Probability that the item is still remembered right now.
-    pub fn retrievability(&self, now: DateTime<Utc>) -> Option<f32> {
-        let memory = self.memory?;
-        let last_review = self.last_review?;
-        Some(retrievability(memory, last_review, now))
+    /// Memory state after the most recent review.
+    pub fn memory(&self) -> Option<MemoryState> {
+        self.reviews.last().map(|review| review.memory)
+    }
+
+    /// Interval scheduled after the most recent review, in days.
+    pub fn interval_days(&self) -> Option<f32> {
+        self.reviews.last().map(|review| review.interval_days)
+    }
+
+    /// Due date of the most recent review.
+    pub fn due(&self) -> Option<DateTime<Utc>> {
+        self.reviews.last().map(|review| review.due)
+    }
+
+    /// When the most recent review happened.
+    pub fn last_review(&self) -> Option<DateTime<Utc>> {
+        self.reviews.last().map(|review| review.review.when)
     }
 }
 
@@ -199,7 +198,8 @@ impl History {
         }
         let previous = index.checked_sub(1).map(|i| self.reviews[i].when);
         let next = self.reviews.get(index + 1).map(|r| r.when);
-        if previous.is_some_and(|previous| when < previous) || next.is_some_and(|next| when > next)
+        if next.unwrap_or(DateTime::<Utc>::MIN_UTC) < when
+            || when < previous.unwrap_or(DateTime::<Utc>::MAX_UTC)
         {
             return Err(TimeError::OutOfOrder);
         }
@@ -246,24 +246,7 @@ impl History {
             });
         }
 
-        let last = scheduled.last().expect("reviews is not empty");
-        Ok(Schedule {
-            memory: Some(last.memory),
-            interval_days: Some(last.interval_days),
-            due: Some(last.due),
-            reviews: scheduled,
-        })
-    }
-
-    pub fn summary(&self, fsrs: &FSRS, desired_retention: f32) -> Result<Summary, FSRSError> {
-        let schedule = self.schedule(fsrs, desired_retention)?;
-        Ok(Summary {
-            reviews: self.reviews.len(),
-            memory: schedule.memory,
-            last_review: self.reviews.last().map(|review| review.when),
-            interval_days: schedule.interval_days.unwrap_or(0.0),
-            due: schedule.due.unwrap_or(self.created),
-        })
+        Ok(Schedule { reviews: scheduled })
     }
 
     fn fsrs_item(&self) -> FSRSItem {
@@ -334,20 +317,20 @@ mod tests {
     }
 
     #[test]
-    fn summary_of_new_history_uses_creation_time() {
+    fn empty_schedule_has_no_state() {
         let history = History::new("new");
-        let summary = history.summary(&FSRS::default(), 0.9).unwrap();
-        assert_eq!(summary.reviews, 0);
-        assert!(summary.memory.is_none());
-        assert_eq!(summary.due, history.created());
-        assert!(summary.retrievability(Utc::now()).is_none());
+        let schedule = history.schedule(&FSRS::default(), 0.9).unwrap();
+        assert!(schedule.reviews().is_empty());
+        assert!(schedule.memory().is_none());
+        assert!(schedule.due().is_none());
+        assert!(schedule.interval_days().is_none());
     }
 
     #[test]
     fn retrievability_is_probability() {
         let history = history_with(&[(0, Rating::Good)]);
         let schedule = history.schedule(&FSRS::default(), 0.9).unwrap();
-        let memory = schedule.memory.unwrap();
+        let memory = schedule.memory().unwrap();
         let review = history.last_review().unwrap().when;
         let r = retrievability(memory, review, review + Duration::days(1));
         assert!((0.0..=1.0).contains(&r));

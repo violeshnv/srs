@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use fsrs::{FSRS, FSRSError};
 use serde::{Deserialize, Serialize};
 
-use super::history::{History, Rating, Review, Summary, TimeError};
+use crate::data::Schedule;
+
+use super::history::{History, Rating, Review, TimeError};
 
 pub const DEFAULT_DESIRED_RETENTION: f32 = 0.9;
 pub const DEFAULT_DATA_PATH: &str = "srs.ron";
@@ -195,6 +197,13 @@ impl Manager {
         self.histories.iter().find(|history| history.name() == name)
     }
 
+    pub(crate) fn schedules(&self) -> Vec<Option<Schedule>> {
+        self.histories()
+            .iter()
+            .map(|history| history.schedule(self.fsrs(), self.desired_retention()).ok())
+            .collect()
+    }
+
     /// Add a new, never-reviewed item.
     pub fn add(&mut self, name: &str) -> Result<(), Error> {
         let name = name.trim();
@@ -311,13 +320,6 @@ impl Manager {
         Ok(())
     }
 
-    pub fn summary(&self, name: &str) -> Result<Summary, Error> {
-        let history = self.get(name).ok_or(Error::NotFound)?;
-        history
-            .summary(&self.fsrs, self.desired_retention)
-            .map_err(Error::Fsrs)
-    }
-
     /// Serialize everything to `self.path`.
     pub fn save(&self) -> Result<(), String> {
         let store = Store {
@@ -410,11 +412,14 @@ mod tests {
         let now = Utc::now();
         manager.review("kanji", Rating::Good, now).unwrap();
 
-        let summary = manager.summary("kanji").unwrap();
-        assert_eq!(summary.reviews, 1);
-        assert!(summary.memory.is_some());
-        assert!(summary.memory.unwrap().stability > 0.0);
-        assert!(summary.due > now);
+        let history = manager.get("kanji").unwrap();
+        let schedule = history
+            .schedule(manager.fsrs(), manager.desired_retention())
+            .unwrap();
+        assert_eq!(history.reviews().len(), 1);
+        assert!(schedule.memory().is_some());
+        assert!(schedule.memory().unwrap().stability > 0.0);
+        assert!(schedule.due().unwrap() > now);
     }
 
     #[test]
@@ -430,16 +435,22 @@ mod tests {
             .review("kanji", Rating::Easy, now + Duration::days(15))
             .unwrap();
 
-        let before = manager.summary("kanji").unwrap();
+        let schedule = |m: &Manager| {
+            m.get("kanji")
+                .unwrap()
+                .schedule(m.fsrs(), m.desired_retention())
+                .unwrap()
+        };
+        let before = schedule(&manager);
         manager.set_rating("kanji", 0, Rating::Again).unwrap();
-        let after = manager.summary("kanji").unwrap();
+        let after = schedule(&manager);
 
-        assert_eq!(after.reviews, 3);
+        assert_eq!(after.reviews().len(), 3);
         assert_ne!(
-            before.memory.unwrap().stability,
-            after.memory.unwrap().stability
+            before.memory().unwrap().stability,
+            after.memory().unwrap().stability
         );
-        assert_ne!(before.due, after.due);
+        assert_ne!(before.due().unwrap(), after.due().unwrap());
     }
 
     #[test]

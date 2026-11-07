@@ -1,6 +1,7 @@
 pub mod app;
+pub mod detail;
 pub mod dialog;
-pub mod history;
+pub mod event;
 pub mod home;
 
 use chrono::{DateTime, Local, Utc};
