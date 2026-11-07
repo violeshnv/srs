@@ -424,7 +424,7 @@ mod tests {
         app.home.focus_on("item2");
 
         let focused_name = |app: &App| {
-            let schedules = app.schedules();
+            let schedules = app.manager.schedules();
             let summaries: Vec<Summary<'_>> = app
                 .manager
                 .histories()
@@ -453,7 +453,7 @@ mod tests {
         // Reviewing changes "vocab"'s due date; the name-based cursor must not move.
         app.review("vocab", Rating::Good);
 
-        let schedules = app.schedules();
+        let schedules = app.manager.schedules();
         let summaries: Vec<Summary<'_>> = app
             .manager
             .histories()
