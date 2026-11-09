@@ -47,17 +47,14 @@ impl Detail {
         }
 
         match key.code {
-            KeyCode::Esc
-            | KeyCode::Left
-            | KeyCode::Char('h')
-            | KeyCode::Char('H')
-            | KeyCode::Char('q')
-            | KeyCode::Char('Q') => Some(Event::Back),
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h' | 'H' | 'q' | 'Q') => {
+                Some(Event::Back)
+            }
+            KeyCode::Up | KeyCode::Char('k' | 'K') => {
                 self.focus = self.focus.saturating_sub(1);
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+            KeyCode::Down | KeyCode::Char('j' | 'J') => {
                 let len = history.reviews().len();
                 self.focus = self.focus.saturating_add(1).min(len.saturating_sub(1));
                 None
@@ -72,11 +69,11 @@ impl Detail {
                     rating,
                 })
             }
-            KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Delete => {
+            KeyCode::Char('x' | 'X') | KeyCode::Delete => {
                 self.delete_review_dialog(history);
                 None
             }
-            KeyCode::Char('t') | KeyCode::Char('T') => {
+            KeyCode::Char('t' | 'T') => {
                 self.edit_time_dialog(history);
                 None
             }
@@ -147,129 +144,129 @@ impl Detail {
             input: TextInput::new(local),
         });
     }
-}
 
-pub(crate) fn render(
-    frame: &mut Frame,
-    detail: &Detail,
-    history: &History,
-    schedule: Option<&Schedule>,
-    fsrs: &FSRS,
-    desired_retention: f32,
-) {
-    let area = frame.area();
-    let now = Utc::now();
+    pub(crate) fn render(
+        &self,
+        frame: &mut Frame,
+        history: &History,
+        schedule: Option<&Schedule>,
+        fsrs: &FSRS,
+        desired_retention: f32,
+    ) {
+        let area = frame.area();
+        let now = Utc::now();
 
-    let instructions = Line::from(vec![
-        " Back ".into(),
-        "<ESC>".blue().bold(),
-        " Change rating ".into(),
-        "<1-4>".blue().bold(),
-        " Delete review ".into(),
-        "<X>".blue().bold(),
-        " Edit time ".into(),
-        "<T>".blue().bold(),
-        " Help ".into(),
-        "<?>".blue().bold(),
-        " ".into(),
-    ]);
+        let instructions = Line::from(vec![
+            " Back ".into(),
+            "<ESC>".blue().bold(),
+            " Change rating ".into(),
+            "<1-4>".blue().bold(),
+            " Delete review ".into(),
+            "<X>".blue().bold(),
+            " Edit time ".into(),
+            "<T>".blue().bold(),
+            " Help ".into(),
+            "<?>".blue().bold(),
+            " ".into(),
+        ]);
 
-    let mut block = Block::bordered()
-        .title(
-            Line::from(format!(" Detail — {} ", detail.name))
-                .bold()
-                .centered(),
-        )
-        .title_bottom(instructions.centered())
-        .border_set(border::THICK);
-    if let Some(status) = &detail.status {
-        block = block.title_top(
-            Line::from(format!(" {} ", status.text))
-                .right_aligned()
-                .style(status.style()),
+        let mut block = Block::bordered()
+            .title(
+                Line::from(format!(" Detail — {} ", self.name))
+                    .bold()
+                    .centered(),
+            )
+            .title_bottom(instructions.centered())
+            .border_set(border::THICK);
+        if let Some(status) = &self.status {
+            block = block.title_top(
+                Line::from(format!(" {} ", status.text))
+                    .right_aligned()
+                    .style(status.style()),
+            );
+        }
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [summary_area, table_area] =
+            Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).areas(inner);
+
+        frame.render_widget(
+            Paragraph::new(Text::from(summary_lines(
+                history,
+                schedule,
+                fsrs,
+                desired_retention,
+                now,
+            ))),
+            summary_area,
         );
-    }
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let [summary_area, table_area] =
-        Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).areas(inner);
-
-    frame.render_widget(
-        Paragraph::new(Text::from(summary_lines(
-            history,
-            schedule,
-            fsrs,
-            desired_retention,
-            now,
-        ))),
-        summary_area,
-    );
-
-    let rows: Vec<Row> = schedule
-        .map(|schedule| {
-            schedule
-                .reviews()
-                .iter()
-                .enumerate()
-                .map(|(index, scheduled)| {
-                    let cells = [
-                        Cell::from((index + 1).to_string()),
-                        Cell::from(fmt_when(scheduled.review.when)),
-                        Cell::from(scheduled.review.rating.label())
-                            .style(rating_style(scheduled.review.rating)),
-                        Cell::from(if index == 0 {
-                            "-".to_string()
+        let rows: Vec<Row> = schedule
+            .map(|schedule| {
+                schedule
+                    .reviews()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, scheduled)| {
+                        let cells = [
+                            Cell::from((index + 1).to_string()),
+                            Cell::from(fmt_when(scheduled.review.when)),
+                            Cell::from(scheduled.review.rating.label())
+                                .style(rating_style(scheduled.review.rating)),
+                            Cell::from(if index == 0 {
+                                "-".to_string()
+                            } else {
+                                fmt_duration(scheduled.elapsed_days)
+                            }),
+                            Cell::from(fmt_duration(scheduled.memory.stability)),
+                            Cell::from(format!("{:.1}", scheduled.memory.difficulty)),
+                            Cell::from(fmt_duration(scheduled.interval_days)),
+                            Cell::from(fmt_when(scheduled.due)),
+                        ];
+                        let row = Row::new(cells);
+                        if index == self.focus {
+                            row.style(Style::new().reversed().bold())
                         } else {
-                            fmt_duration(scheduled.elapsed_days)
-                        }),
-                        Cell::from(fmt_duration(scheduled.memory.stability)),
-                        Cell::from(format!("{:.1}", scheduled.memory.difficulty)),
-                        Cell::from(fmt_duration(scheduled.interval_days)),
-                        Cell::from(fmt_when(scheduled.due)),
-                    ];
-                    let row = Row::new(cells);
-                    if index == detail.focus {
-                        row.style(Style::new().reversed().bold())
-                    } else {
-                        row
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                            row
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    let header = Row::new([
-        "#",
-        "When",
-        "Rating",
-        "Elapsed",
-        "Stability",
-        "Difficulty",
-        "Interval",
-        "Due",
-    ])
-    .style(Style::new().bold());
+        let header = Row::new([
+            "#",
+            "When",
+            "Rating",
+            "Elapsed",
+            "Stability",
+            "Difficulty",
+            "Interval",
+            "Due",
+        ])
+        .style(Style::new().bold());
 
-    let widths = [
-        Constraint::Percentage(5),
-        Constraint::Percentage(20),
-        Constraint::Percentage(10),
-        Constraint::Percentage(9),
-        Constraint::Percentage(12),
-        Constraint::Percentage(11),
-        Constraint::Percentage(11),
-        Constraint::Percentage(22),
-    ];
+        let widths = [
+            Constraint::Percentage(5),
+            Constraint::Percentage(20),
+            Constraint::Percentage(10),
+            Constraint::Percentage(9),
+            Constraint::Percentage(12),
+            Constraint::Percentage(11),
+            Constraint::Percentage(11),
+            Constraint::Percentage(22),
+        ];
 
-    Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1)
-        .render(table_area, frame.buffer_mut());
+        Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .render(table_area, frame.buffer_mut());
 
-    if let Some(dialog) = &detail.dialog {
-        dialog.render(frame.area(), frame.buffer_mut());
+        if let Some(dialog) = &self.dialog {
+            dialog.render(frame.area(), frame.buffer_mut());
+        }
     }
 }
 

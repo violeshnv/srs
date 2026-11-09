@@ -8,11 +8,11 @@ use crate::data::{Manager, Rating};
 
 use super::{
     Status,
-    detail::{self, Detail},
+    detail::Detail,
     dialog::Dialog,
     event::Event,
     fmt_when,
-    home::{self, Home, Summary},
+    home::{Home, Summary},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame) {
         match self.active {
             Active::Home => {
                 let file_name = self.file_name();
@@ -70,7 +70,7 @@ impl App {
                     .map(|(history, schedule)| Summary::new(history, schedule.as_ref()))
                     .collect();
                 let ordered = self.home.order(&summaries);
-                home::render(frame, &self.home, &ordered, &file_name);
+                self.home.render(frame, &ordered, &file_name);
             }
             Active::Detail => {
                 let name = self.detail.name.clone();
@@ -81,9 +81,8 @@ impl App {
                         .ok()
                 });
                 match history {
-                    Some(history) => detail::render(
+                    Some(history) => self.detail.render(
                         frame,
-                        &self.detail,
                         history,
                         schedule.as_ref(),
                         self.manager.fsrs(),
@@ -125,8 +124,7 @@ impl App {
                     .zip(&schedules)
                     .map(|(history, schedule)| Summary::new(history, schedule.as_ref()))
                     .collect();
-                let ordered = self.home.order(&summaries);
-                self.home.handle_key(key, &ordered)
+                self.home.handle_key(key, &summaries)
             }
             Active::Detail => {
                 let name = self.detail.name.clone();
@@ -147,9 +145,30 @@ impl App {
         match event {
             Event::Open(name) => self.open_detail(name),
             Event::Review { name, rating } => self.review(&name, rating),
-            Event::Add(name) => self.add(&name),
-            Event::Rename { old, new } => self.rename(&old, &new),
-            Event::Delete(name) => self.delete(&name),
+            Event::Add { name, post } => match self.manager.add(&name) {
+                Ok(()) => {
+                    post(&mut self.home);
+                    self.home.status = Some(Status::info(format!("Added \"{name}\"")));
+                    self.save();
+                }
+                Err(error) => self.home.dialog = Some(Dialog::Error(error.to_string())),
+            },
+            Event::Rename { old, new, post } => match self.manager.rename(&old, &new) {
+                Ok(()) => {
+                    post(&mut self.home);
+                    self.home.status =
+                        Some(Status::info(format!("Renamed \"{old}\" to \"{new}\"")));
+                    self.save();
+                }
+                Err(error) => self.home.dialog = Some(Dialog::Error(error.to_string())),
+            },
+            Event::Delete { name, post } => {
+                if self.manager.remove(&name) {
+                    post(&mut self.home);
+                    self.home.status = Some(Status::info(format!("Deleted \"{name}\"")));
+                    self.save();
+                }
+            }
             Event::Undo(name) => self.undo(&name),
             Event::Quit => self.quit(),
             Event::Help => self.show_help(),
@@ -191,40 +210,6 @@ impl App {
                 self.save();
             }
             Err(error) => self.home.dialog = Some(Dialog::Error(error.to_string())),
-        }
-    }
-
-    fn add(&mut self, name: &str) {
-        match self.manager.add(name) {
-            Ok(()) => {
-                self.home.focus_on(name);
-                self.home.status = Some(Status::info(format!("Added \"{name}\"")));
-                self.save();
-            }
-            Err(error) => self.home.dialog = Some(Dialog::Error(error.to_string())),
-        }
-    }
-
-    fn rename(&mut self, old: &str, new: &str) {
-        match self.manager.rename(old, new) {
-            Ok(()) => {
-                self.home.focus_on(new);
-                self.home.status = Some(Status::info(format!("Renamed \"{old}\" to \"{new}\"")));
-                self.save();
-            }
-            Err(error) => self.home.dialog = Some(Dialog::Error(error.to_string())),
-        }
-    }
-
-    fn delete(&mut self, name: &str) {
-        let next_focus = self.home_focus_after_removal(name);
-        if self.manager.remove(name) {
-            match next_focus {
-                Some(next) => self.home.focus_on(&next),
-                None => self.home.clear_focus(),
-            }
-            self.home.status = Some(Status::info(format!("Deleted \"{name}\"")));
-            self.save();
         }
     }
 
@@ -288,39 +273,6 @@ impl App {
         }
     }
 
-    /// The item to focus after `name` is removed: the current selection if it
-    /// survives, otherwise its neighbour in the sorted list.
-    fn home_focus_after_removal(&self, removed: &str) -> Option<String> {
-        let schedules = self.manager.schedules();
-        let summaries: Vec<Summary<'_>> = self
-            .manager
-            .histories()
-            .iter()
-            .zip(&schedules)
-            .map(|(history, schedule)| Summary::new(history, schedule.as_ref()))
-            .collect();
-        let ordered = self.home.order(&summaries);
-        let current = self.home.focused_index(&ordered);
-        let current_name = ordered
-            .get(current)
-            .map(|summary| summary.name().to_string());
-
-        let remaining: Vec<&Summary<'_>> = ordered
-            .iter()
-            .filter(|summary| summary.name() != removed)
-            .collect();
-        if remaining.is_empty() {
-            return None;
-        }
-
-        match current_name {
-            Some(name) if name != removed => Some(name),
-            _ => remaining
-                .get(current.min(remaining.len() - 1))
-                .map(|summary| summary.name().to_string()),
-        }
-    }
-
     fn show_help(&mut self) {
         let dialog = Dialog::Help {
             path: self.manager.path().display().to_string(),
@@ -365,10 +317,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::{Terminal, backend::TestBackend};
 
     use crate::tui::dialog::TextInput;
-    use crate::tui::home::Sort;
 
     fn app() -> App {
         let path = std::env::temp_dir().join(format!(
@@ -388,7 +340,7 @@ mod tests {
         app
     }
 
-    fn render(app: &App, width: u16, height: u16) {
+    fn render(app: &mut App, width: u16, height: u16) {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -397,33 +349,31 @@ mod tests {
     #[test]
     fn renders_every_page_and_dialog() {
         let mut app = app();
-        render(&app, 120, 30);
-        render(&app, 40, 12);
+        render(&mut app, 120, 30);
+        render(&mut app, 40, 12);
 
         app.active = Active::Detail;
         app.detail = Detail::new("kanji".to_string(), 0);
-        render(&app, 120, 30);
-        render(&app, 40, 12);
+        render(&mut app, 120, 30);
+        render(&mut app, 40, 12);
 
         app.active = Active::Home;
         app.home.dialog = Some(Dialog::Add(TextInput::new("new item")));
-        render(&app, 120, 30);
+        render(&mut app, 120, 30);
         app.home.dialog = Some(Dialog::Help {
             path: "srs.ron".to_string(),
         });
-        render(&app, 120, 30);
+        render(&mut app, 120, 30);
         app.home.dialog = Some(Dialog::Error("something went wrong".to_string()));
-        render(&app, 120, 30);
+        render(&mut app, 120, 30);
     }
 
     #[test]
-    fn focus_is_stable_across_sort_changes() {
+    fn delete_adjusts_focus_through_post_work() {
         let mut app = app();
-        app.manager.add("item10").unwrap();
-        app.manager.add("item2").unwrap();
-        app.home.focus_on("item2");
+        app.home.set_focus(1); // "vocab"
 
-        let focused_name = |app: &App| {
+        let event = {
             let schedules = app.manager.schedules();
             let summaries: Vec<Summary<'_>> = app
                 .manager
@@ -432,36 +382,46 @@ mod tests {
                 .zip(&schedules)
                 .map(|(history, schedule)| Summary::new(history, schedule.as_ref()))
                 .collect();
-            let ordered = app.home.order(&summaries);
-            ordered[app.home.focused_index(&ordered)].name().to_string()
-        };
 
-        app.home.set_sort(Sort::NameAsc);
-        assert_eq!(focused_name(&app), "item2");
-        app.home.set_sort(Sort::NameDesc);
-        assert_eq!(focused_name(&app), "item2");
-        app.home.set_sort(Sort::DueAsc);
-        assert_eq!(focused_name(&app), "item2");
-        app.home.set_sort(Sort::DueDesc);
-        assert_eq!(focused_name(&app), "item2");
+            let open = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+            assert!(app.home.handle_key(open, &summaries).is_none());
+
+            let confirm = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            app.home
+                .handle_key(confirm, &summaries)
+                .expect("delete event")
+        };
+        app.apply(event);
+
+        // One item left, so the cursor must be clamped back to index 0.
+        assert_eq!(app.home.focus(), 0);
+        assert_eq!(app.manager.histories().len(), 1);
     }
 
     #[test]
-    fn focus_survives_a_review_that_changes_order() {
-        let mut app = app();
-        app.home.focus_on("vocab");
-        // Reviewing changes "vocab"'s due date; the name-based cursor must not move.
-        app.review("vocab", Rating::Good);
+    fn add_dialog_renders_when_list_is_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "srs-tui-empty-{}-{}.ron",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut app = App::new(path);
+        app.home.dialog = Some(Dialog::Add(TextInput::default()));
 
-        let schedules = app.manager.schedules();
-        let summaries: Vec<Summary<'_>> = app
-            .manager
-            .histories()
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
             .iter()
-            .zip(&schedules)
-            .map(|(history, schedule)| Summary::new(history, schedule.as_ref()))
+            .map(|cell| cell.symbol())
             .collect();
-        let ordered = app.home.order(&summaries);
-        assert_eq!(ordered[app.home.focused_index(&ordered)].name(), "vocab");
+        assert!(text.contains("Add item"));
     }
 }

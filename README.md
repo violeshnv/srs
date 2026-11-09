@@ -134,4 +134,4 @@ cargo clippy --all-targets
 
 The tests cover review replay, editing/deleting reviews, time-ordering
 validation, save/load round trips, natural sorting, focus stability across
-re-sorts/reviews, and rendering every page/dialog with a `TestBackend`.
+re-sorts and renames, and rendering every page/dialog with a `TestBackend`.

@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Cell, Paragraph, Row, Table, Widget},
 };
 
-use crate::data::{History, Rating, Schedule, retrievability};
+use crate::data::{History, Rating, Schedule, history::Review, retrievability};
 
 use super::{
     Status, dialog::Confirm, dialog::ConfirmAction, dialog::Dialog, dialog::Outcome,
@@ -66,8 +66,8 @@ impl<'a> Summary<'a> {
         self.history.name()
     }
 
-    pub(crate) fn reviews(&self) -> usize {
-        self.history.reviews().len()
+    pub(crate) fn reviews(&self) -> &[Review] {
+        self.history.reviews()
     }
 
     pub(crate) fn last_rating(&self) -> Option<Rating> {
@@ -109,18 +109,29 @@ impl<'a> Summary<'a> {
 #[derive(Default)]
 pub(crate) struct Home {
     sort: Sort,
-    /// Name of the item under the cursor. Names are the stable identity, so the
-    /// cursor stays on the same item when sorting or a review changes the order.
-    focused: Option<String>,
+    /// Cursor position in the ordered list.
+    focus: usize,
+    /// Item to keep under the cursor after the list is re-ordered (re-sort or
+    /// rename). Resolved to a fresh index on the next [`Self::order`] call.
+    follow: Option<String>,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) status: Option<Status>,
 }
 
 impl Home {
-    /// Order rows according to the current sort setting.
-    pub(crate) fn order<'a>(&self, rows: &[Summary<'a>]) -> Vec<Summary<'a>> {
+    /// Order rows according to the current sort setting and resolve any pending
+    /// `follow` into a concrete `focus` index.
+    pub(crate) fn order<'a>(&mut self, rows: &[Summary<'a>]) -> Vec<Summary<'a>> {
         let mut ordered = rows.to_vec();
         ordered.sort_by(|a, b| self.compare(a, b));
+
+        if let Some(name) = self.follow.take() {
+            self.focus = ordered
+                .iter()
+                .position(|summary| summary.name() == name)
+                .unwrap_or(self.focus);
+        }
+        self.focus = self.focus.min(ordered.len().saturating_sub(1));
         ordered
     }
 
@@ -139,94 +150,92 @@ impl Home {
         }
     }
 
-    pub(crate) fn focused_index(&self, ordered: &[Summary<'_>]) -> usize {
-        if ordered.is_empty() {
-            return 0;
-        }
-        self.focused
-            .as_deref()
-            .and_then(|name| ordered.iter().position(|summary| summary.name() == name))
-            .unwrap_or(0)
-            .min(ordered.len() - 1)
-    }
-
     fn focused_name(&self, ordered: &[Summary<'_>]) -> Option<String> {
-        if ordered.is_empty() {
-            None
-        } else {
-            Some(ordered[self.focused_index(ordered)].name().to_string())
-        }
+        ordered
+            .get(self.focus)
+            .map(|summary| summary.name().to_string())
     }
 
     fn move_focus(&mut self, delta: isize, ordered: &[Summary<'_>]) {
         if ordered.is_empty() {
-            self.focused = None;
+            self.focus = 0;
             return;
         }
-        let current = self.focused_index(ordered);
-        let next = current.saturating_add_signed(delta).min(ordered.len() - 1);
-        self.focused = Some(ordered[next].name().to_string());
+        self.focus = self
+            .focus
+            .saturating_add_signed(delta)
+            .min(ordered.len() - 1);
     }
 
-    pub(crate) fn focus_on(&mut self, name: &str) {
-        self.focused = Some(name.to_string());
-    }
-
-    pub(crate) fn clear_focus(&mut self) {
-        self.focused = None;
+    fn clamp_focus(&mut self, len: usize) {
+        self.focus = self.focus.min(len.saturating_sub(1));
     }
 
     #[cfg(test)]
-    pub(crate) fn set_sort(&mut self, sort: Sort) {
-        self.sort = sort;
+    pub(crate) fn focus(&self) -> usize {
+        self.focus
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_focus(&mut self, focus: usize) {
+        self.focus = focus;
     }
 
     /// Returns an [`Event`] for the `App` to apply, or `None` if the key was
     /// fully handled by this page (focus movement, dialog typing, ...).
-    pub(crate) fn handle_key(&mut self, key: KeyEvent, ordered: &[Summary<'_>]) -> Option<Event> {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, rows: &[Summary<'_>]) -> Option<Event> {
         self.status = None;
 
-        if let Some(dialog) = &mut self.dialog {
-            let outcome = dialog.handle_key_event(key);
-            return self.apply_dialog(outcome?);
+        if self.dialog.is_some() {
+            let outcome = self
+                .dialog
+                .as_mut()
+                .expect("dialog was checked above")
+                .handle_key_event(key);
+            return match outcome {
+                Some(outcome) => self.apply_dialog(outcome, rows),
+                None => None,
+            };
         }
 
+        let ordered = self.order(rows);
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => Some(Event::Quit),
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                self.move_focus(-1, ordered);
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc => Some(Event::Quit),
+            KeyCode::Up | KeyCode::Char('k' | 'K') => {
+                self.move_focus(-1, &ordered);
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                self.move_focus(1, ordered);
+            KeyCode::Down | KeyCode::Char('j' | 'J') => {
+                self.move_focus(1, &ordered);
                 None
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('L') => {
-                self.focused_name(ordered).map(Event::Open)
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'L') => {
+                self.focused_name(&ordered).map(Event::Open)
             }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Char('a' | 'A') => {
                 self.dialog = Some(Dialog::Add(TextInput::default()));
                 None
             }
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.rename_dialog(ordered);
+            KeyCode::Char('r' | 'R') => {
+                self.rename_dialog(&ordered);
                 None
             }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                self.delete_dialog(ordered);
+            KeyCode::Char('d' | 'D') => {
+                self.delete_dialog(&ordered);
                 None
             }
-            KeyCode::Char('u') | KeyCode::Char('U') => {
-                self.undo_dialog(ordered);
+            KeyCode::Char('u' | 'U') => {
+                self.undo_dialog(&ordered);
                 None
             }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
+            KeyCode::Char('s' | 'S') => {
+                self.follow = self.focused_name(&ordered);
                 self.sort = self.sort.next();
                 None
             }
             KeyCode::Char('?') => Some(Event::Help),
             KeyCode::Char(character @ '1'..='4') => {
-                match (Rating::from_char(character), self.focused_name(ordered)) {
+                match (Rating::from_char(character), self.focused_name(&ordered)) {
                     (Some(rating), Some(name)) => Some(Event::Review { name, rating }),
                     _ => None,
                 }
@@ -235,19 +244,30 @@ impl Home {
         }
     }
 
-    fn apply_dialog(&mut self, outcome: Outcome) -> Option<Event> {
+    fn apply_dialog(&mut self, outcome: Outcome, rows: &[Summary<'_>]) -> Option<Event> {
         let dialog = self.dialog.take()?;
         if outcome == Outcome::Cancel {
             return None;
         }
         match dialog {
-            Dialog::Add(input) => Some(Event::Add(input.value().trim().to_string())),
-            Dialog::Rename { old, input } => Some(Event::Rename {
-                old,
-                new: input.value().trim().to_string(),
-            }),
+            Dialog::Add(input) => {
+                let name = input.value().trim().to_string();
+                let follow = name.clone();
+                let post = Box::new(move |home: &mut Home| home.follow = Some(follow));
+                Some(Event::Add { name, post })
+            }
+            Dialog::Rename { old, input } => {
+                let new = input.value().trim().to_string();
+                let follow = new.clone();
+                let post = Box::new(move |home: &mut Home| home.follow = Some(follow));
+                Some(Event::Rename { old, new, post })
+            }
             Dialog::Confirm(confirm) => match confirm.action {
-                ConfirmAction::RemoveHistory(name) => Some(Event::Delete(name)),
+                ConfirmAction::RemoveHistory(name) => {
+                    let new_len = rows.len().saturating_sub(1);
+                    let post = Box::new(move |home: &mut Home| home.clamp_focus(new_len));
+                    Some(Event::Delete { name, post })
+                }
                 ConfirmAction::UndoLast(name) => Some(Event::Undo(name)),
                 ConfirmAction::RemoveReview { .. } => None,
             },
@@ -268,7 +288,7 @@ impl Home {
         let Some(name) = self.focused_name(ordered) else {
             return;
         };
-        let reviews = ordered[self.focused_index(ordered)].reviews();
+        let reviews = ordered[self.focus].reviews().len();
         self.dialog = Some(Dialog::Confirm(Confirm {
             title: "Delete item".to_string(),
             message: format!(
@@ -282,7 +302,7 @@ impl Home {
         let Some(name) = self.focused_name(ordered) else {
             return;
         };
-        let summary = &ordered[self.focused_index(ordered)];
+        let summary = &ordered[self.focus];
         match (summary.last_rating(), summary.last_review()) {
             (Some(rating), Some(when)) => {
                 self.dialog = Some(Dialog::Confirm(Confirm {
@@ -297,147 +317,152 @@ impl Home {
             _ => self.status = Some(Status::info("Nothing to undo for this item")),
         }
     }
-}
 
-pub(crate) fn render(frame: &mut Frame, home: &Home, ordered: &[Summary<'_>], file_name: &str) {
-    let area = frame.area();
-    let now = Utc::now();
-    let focus = home.focused_index(ordered);
+    pub(crate) fn render(&self, frame: &mut Frame, ordered: &[Summary<'_>], file_name: &str) {
+        let area = frame.area();
+        let now = Utc::now();
+        let focus = self.focus.min(ordered.len().saturating_sub(1));
 
-    let instructions = Line::from(vec![
-        " Open ".into(),
-        "<ENTER>".blue().bold(),
-        " Rate ".into(),
-        "<1-4>".blue().bold(),
-        " Add ".into(),
-        "<A>".blue().bold(),
-        " Rename ".into(),
-        "<R>".blue().bold(),
-        " Delete ".into(),
-        "<D>".blue().bold(),
-        " Undo ".into(),
-        "<U>".blue().bold(),
-        " Sort ".into(),
-        "<S>".blue().bold(),
-        " Help ".into(),
-        "<?>".blue().bold(),
-        " Quit ".into(),
-        "<Q>".blue().bold(),
-        " ".into(),
-    ]);
-
-    let mut block = Block::bordered()
-        .title(Line::from(format!(" SRS — {file_name} ")).bold().centered())
-        .title_top(Line::from(format!(" sort: {} ", home.sort.label())).left_aligned())
-        .title_bottom(instructions.centered())
-        .border_set(border::THICK);
-    if let Some(status) = &home.status {
-        block = block.title_top(
-            Line::from(format!(" {} ", status.text))
-                .right_aligned()
-                .style(status.style()),
-        );
-    }
-
-    if ordered.is_empty() {
-        let empty = Text::from(vec![
-            Line::from(""),
-            Line::from("  No items yet.").bold(),
-            Line::from("  Press <A> to add your first item."),
+        let instructions = Line::from(vec![
+            " Open ".into(),
+            "<ENTER>".blue().bold(),
+            " Rate ".into(),
+            "<1-4>".blue().bold(),
+            " Add ".into(),
+            "<A>".blue().bold(),
+            " Rename ".into(),
+            "<R>".blue().bold(),
+            " Delete ".into(),
+            "<D>".blue().bold(),
+            " Undo ".into(),
+            "<U>".blue().bold(),
+            " Sort ".into(),
+            "<S>".blue().bold(),
+            " Help ".into(),
+            "<?>".blue().bold(),
+            " Quit ".into(),
+            "<Q>".blue().bold(),
+            " ".into(),
         ]);
-        frame.render_widget(Paragraph::new(empty).block(block), area);
-        return;
-    }
 
-    let header = Row::new([
-        "Name",
-        "Due",
-        "Interval",
-        "Reps",
-        "Stability",
-        "Difficulty",
-        "Last",
-        "Retrievability",
-    ])
-    .style(Style::new().bold());
+        let mut block = Block::bordered()
+            .title(Line::from(format!(" SRS — {file_name} ")).bold().centered())
+            .title_top(Line::from(format!(" sort: {} ", self.sort.label())).left_aligned())
+            .title_bottom(instructions.centered())
+            .border_set(border::THICK);
+        if let Some(status) = &self.status {
+            block = block.title_top(
+                Line::from(format!(" {} ", status.text))
+                    .right_aligned()
+                    .style(status.style()),
+            );
+        }
 
-    let widths = [
-        Constraint::Percentage(24),
-        Constraint::Percentage(16),
-        Constraint::Percentage(11),
-        Constraint::Percentage(6),
-        Constraint::Percentage(12),
-        Constraint::Percentage(10),
-        Constraint::Percentage(8),
-        Constraint::Percentage(13),
-    ];
+        if ordered.is_empty() {
+            let empty = Text::from(vec![
+                Line::from(""),
+                Line::from("  No items yet.").bold(),
+                Line::from("  Press <A> to add your first item."),
+            ]);
+            frame.render_widget(Paragraph::new(empty).block(block), area);
 
-    let rows = ordered.iter().enumerate().map(|(index, summary)| {
-        let (due, due_style) = if !summary.has_schedule() {
-            ("?".to_string(), Style::new().fg(Color::Red))
-        } else if summary.reviews() == 0 {
-            ("new".to_string(), Style::new())
-        } else {
-            let due = summary.due();
-            (
-                fmt_due(due, now),
-                if due < now {
-                    Style::new().fg(Color::Red)
-                } else {
-                    Style::new()
-                },
-            )
-        };
+            if let Some(dialog) = &self.dialog {
+                dialog.render(frame.area(), frame.buffer_mut());
+            }
 
-        let interval = if summary.has_schedule() && summary.reviews() > 0 {
-            fmt_duration(summary.interval_days())
-        } else {
-            "-".to_string()
-        };
-        let stability = match summary.memory() {
-            Some(memory) => fmt_duration(memory.stability),
-            None => "-".to_string(),
-        };
-        let difficulty = match summary.memory() {
-            Some(memory) => format!("{:.1}", memory.difficulty),
-            None => "-".to_string(),
-        };
-        let (last, last_style) = match summary.last_rating() {
-            Some(rating) => (rating.label(), rating_style(rating)),
-            None => ("-", Style::new()),
-        };
-        let (retrievability, retr_style) = match summary.retrievability(now) {
-            Some(value) => (fmt_retrievability(value), retrievability_style(value)),
-            None => ("-".to_string(), Style::new()),
-        };
+            return;
+        }
 
-        let cells = [
-            Cell::from(summary.name().to_string()),
-            Cell::from(due).style(due_style),
-            Cell::from(interval),
-            Cell::from(summary.reviews().to_string()),
-            Cell::from(stability),
-            Cell::from(difficulty),
-            Cell::from(last).style(last_style),
-            Cell::from(retrievability).style(retr_style),
+        let header = Row::new([
+            "Name",
+            "Due",
+            "Interval",
+            "Reps",
+            "Stability",
+            "Difficulty",
+            "Last",
+            "Retrievability",
+        ])
+        .style(Style::new().bold());
+
+        let widths = [
+            Constraint::Percentage(24),
+            Constraint::Percentage(16),
+            Constraint::Percentage(11),
+            Constraint::Percentage(6),
+            Constraint::Percentage(12),
+            Constraint::Percentage(10),
+            Constraint::Percentage(8),
+            Constraint::Percentage(13),
         ];
 
-        let row = Row::new(cells);
-        if index == focus {
-            row.style(Style::new().reversed().bold())
-        } else {
-            row
+        let rows = ordered.iter().enumerate().map(|(index, summary)| {
+            let (due, due_style) = if !summary.has_schedule() {
+                ("?".to_string(), Style::new().fg(Color::Red))
+            } else if summary.reviews().is_empty() {
+                ("new".to_string(), Style::new())
+            } else {
+                let due = summary.due();
+                (
+                    fmt_due(due, now),
+                    if due < now {
+                        Style::new().fg(Color::Red)
+                    } else {
+                        Style::new()
+                    },
+                )
+            };
+
+            let interval = if summary.has_schedule() && !summary.reviews().is_empty() {
+                fmt_duration(summary.interval_days())
+            } else {
+                "-".to_string()
+            };
+            let stability = match summary.memory() {
+                Some(memory) => fmt_duration(memory.stability),
+                None => "-".to_string(),
+            };
+            let difficulty = match summary.memory() {
+                Some(memory) => format!("{:.1}", memory.difficulty),
+                None => "-".to_string(),
+            };
+            let (last, last_style) = match summary.last_rating() {
+                Some(rating) => (rating.label(), rating_style(rating)),
+                None => ("-", Style::new()),
+            };
+            let (retrievability, retr_style) = match summary.retrievability(now) {
+                Some(value) => (fmt_retrievability(value), retrievability_style(value)),
+                None => ("-".to_string(), Style::new()),
+            };
+
+            let cells = [
+                Cell::from(summary.name().to_string()),
+                Cell::from(due).style(due_style),
+                Cell::from(interval),
+                Cell::from(summary.reviews().len().to_string()),
+                Cell::from(stability),
+                Cell::from(difficulty),
+                Cell::from(last).style(last_style),
+                Cell::from(retrievability).style(retr_style),
+            ];
+
+            let row = Row::new(cells);
+            if index == focus {
+                row.style(Style::new().reversed().bold())
+            } else {
+                row
+            }
+        });
+
+        Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .block(block)
+            .render(area, frame.buffer_mut());
+
+        if let Some(dialog) = &self.dialog {
+            dialog.render(frame.area(), frame.buffer_mut());
         }
-    });
-
-    Table::new(rows, widths)
-        .header(header)
-        .column_spacing(1)
-        .block(block)
-        .render(area, frame.buffer_mut());
-
-    if let Some(dialog) = &home.dialog {
-        dialog.render(frame.area(), frame.buffer_mut());
     }
 }
 
@@ -489,6 +514,9 @@ fn take_number<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+    use crossterm::event::KeyModifiers;
+    use fsrs::FSRS;
 
     #[test]
     fn natural_order_sorts_numbers() {
@@ -504,5 +532,47 @@ mod tests {
     fn natural_order_is_case_insensitive() {
         assert_eq!(natural_cmp("Apple", "apple"), Ordering::Equal);
         assert_eq!(natural_cmp("B", "a"), Ordering::Greater);
+    }
+
+    #[test]
+    fn clamp_focus_stays_in_range() {
+        let mut home = Home {
+            focus: 5,
+            ..Default::default()
+        };
+        home.clamp_focus(3);
+        assert_eq!(home.focus, 2);
+        home.clamp_focus(0);
+        assert_eq!(home.focus, 0);
+    }
+
+    #[test]
+    fn sort_toggle_keeps_focus_on_same_item() {
+        let fsrs = FSRS::default();
+        let first = History::new("b-item10");
+        let mut second = History::new("a-item2");
+        second.push_review(crate::data::history::Review::new(
+            Utc::now() + Duration::days(30),
+            Rating::Good,
+        ));
+        let first_schedule = first.schedule(&fsrs, 0.9).unwrap();
+        let second_schedule = second.schedule(&fsrs, 0.9).unwrap();
+        let rows = [
+            Summary::new(&first, Some(&first_schedule)),
+            Summary::new(&second, Some(&second_schedule)),
+        ];
+
+        let mut home = Home {
+            focus: 1, // second item ("a-item2") is due later, so it is index 1
+            ..Default::default()
+        };
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        home.handle_key(key, &rows);
+
+        assert_eq!(home.sort, Sort::DueDesc);
+        assert_eq!(home.follow.as_deref(), Some("a-item2"));
+
+        let ordered = home.order(&rows);
+        assert_eq!(ordered[home.focus].name(), "a-item2");
     }
 }

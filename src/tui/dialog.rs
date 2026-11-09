@@ -133,11 +133,9 @@ impl Dialog {
                 _ => None,
             },
             Self::Help { .. } => match key.code {
-                KeyCode::Enter
-                | KeyCode::Esc
-                | KeyCode::Char('q')
-                | KeyCode::Char('Q')
-                | KeyCode::Char('?') => Some(Outcome::Cancel),
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q' | 'Q' | '?') => {
+                    Some(Outcome::Cancel)
+                }
                 _ => None,
             },
         }
